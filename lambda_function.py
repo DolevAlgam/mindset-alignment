@@ -523,8 +523,8 @@ def handle_call_analyzed(body):
         except ValueError:
             print(f"Could not parse call_later_time: {call_later_time}")
 
-    # Check if all 4 fields are present (complete call)
-    all_present = all(v is not None for v in [vision, goal, yesterday_performance, plan])
+    # Check if all 4 fields are present and non-empty (complete call)
+    all_present = all(v for v in [vision, goal, yesterday_performance, plan])
 
     if all_present:
         state["status"] = "completed"
