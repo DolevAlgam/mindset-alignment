@@ -44,7 +44,7 @@ EventBridge 8 PM ─────────────────────
 | EventBridge Schedule | `daily-fallback` (cron, configurable hour) |
 | EventBridge Schedule | `cutoff-log` (cron, configurable hour) |
 | Scheduler IAM Role | `retell-scheduler-role` |
-| CloudWatch Dashboard | `RetellSlackBridge` |
+| CloudWatch Dashboard | [`RetellSlackBridge`](https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1#dashboards/dashboard/RetellSlackBridge) |
 | CloudWatch Metric | `RetellSlackBridge / DailyPerformance` |
 
 ## Environment Variables (Lambda)
@@ -79,25 +79,30 @@ EventBridge 8 PM ─────────────────────
 
 ## Deployment
 
-**Provision infrastructure (first time or update):**
+Run all 4 steps in order for a full deploy:
+
 ```bash
+# 1. Provision infra (S3, IAM, EventBridge schedules, Lambda env vars + timeout)
 source .env && python provision_scheduler.py
-```
 
-**Update Retell agent:**
-```bash
+# 2. Deploy Lambda code
+zip function.zip lambda_function.py && aws lambda update-function-code \
+  --function-name retell-slack-bridge --zip-file fileb://function.zip --region us-east-1
+
+# 3. Update Retell agent (prompt + post-call analysis variables)
 source .env && python update_agent.py
-```
 
-**Update Lambda code:**
-```bash
-zip function.zip lambda_function.py && aws lambda update-function-code --function-name retell-slack-bridge --zip-file fileb://function.zip --region us-east-1
-```
-
-**Create/update CloudWatch dashboard:**
-```bash
+# 4. Update CloudWatch dashboard
 python create_dashboard.py
 ```
+
+Steps 1 and 3 require `.env` to be sourced (see `.env.example`).
+
+All scripts are safe to re-run:
+- `provision_scheduler.py` creates resources if missing, updates if existing. `RETELL_API_KEY` and `TRIGGER_API_KEY` are only set on Lambda if not already present (won't overwrite).
+- `update_agent.py` always sets the full prompt and analysis variables to the desired state.
+- `create_dashboard.py` always overwrites the dashboard with the desired state.
+- Lambda deploy always overwrites the function code.
 
 ## S3 State (`state.json`)
 
