@@ -345,3 +345,146 @@ aws lambda invoke --function-name retell-slack-bridge --region us-east-1 \
   --payload '{"action":"daily_fallback"}' /dev/stdout
 # ASSERT: Skipped (completed)
 ```
+
+---
+
+## TC11: Inbound Call — Zero Data Before Fallback (Ignored)
+
+**Type**: Fully automated (simulate webhooks)
+
+```bash
+# 1. Clear state for fresh day
+echo '{}' | aws s3 cp - s3://$S3_BUCKET/state.json
+
+# 2. Simulate inbound call_ended (user hangup, direction=inbound)
+curl -s -X POST "$FURL" \
+  -H "Content-Type: application/json" \
+  -d '{"event":"call_ended","call":{"call_id":"inbound-1","call_status":"ended","disconnection_reason":"user_hangup","direction":"inbound"}}'
+
+# 3. Simulate call_analyzed with zero data (all null, direction=inbound)
+# NOTE: Test this BEFORE fallback hour (default 12 PM)
+curl -s -X POST "$FURL" \
+  -H "Content-Type: application/json" \
+  -d '{"event":"call_analyzed","call":{"direction":"inbound","call_id":"inbound-1","call_analysis":{"custom_analysis_data":{"vision":null,"most_important_goal_now":null,"yesterday_performance":null,"daily_plan_for_goal":null,"call_later_time":""}}}}'
+
+# 4. Check state
+aws s3 cp s3://$S3_BUCKET/state.json - | python3 -m json.tool
+# ASSERT: status=pending (NOT scheduled), no retry schedule created
+# ASSERT: call_attempts=0
+
+# 5. No new schedules created
+aws scheduler list-schedules --group-name retell-calls --region us-east-1
+# ASSERT: No new one-time schedules
+```
+
+---
+
+## TC12: Inbound Call — Zero Data After Fallback (Retry)
+
+**Type**: Fully automated (simulate webhooks)
+
+```bash
+# 1. Seed state as if fallback already fired (call_attempts=1, after noon)
+cat <<'EOF' | aws s3 cp - s3://$S3_BUCKET/state.json
+{"date":"2026-03-07","status":"calling","scheduled_call_time":null,"schedule_name":null,"call_attempts":1,"last_attempt_time":"2026-03-07T13:00:00","last_call_id":"outbound-1","triggers":[],"call_later_time":null,"completed_at":null,"today_data":null,"yesterday_data":null}
+EOF
+
+# 2. Simulate inbound call_analyzed with zero data (after fallback hour)
+curl -s -X POST "$FURL" \
+  -H "Content-Type: application/json" \
+  -d '{"event":"call_analyzed","call":{"direction":"inbound","call_id":"inbound-2","call_analysis":{"custom_analysis_data":{"vision":null,"most_important_goal_now":null,"yesterday_performance":null,"daily_plan_for_goal":null,"call_later_time":""}}}}'
+
+# 3. Check state
+aws s3 cp s3://$S3_BUCKET/state.json - | python3 -m json.tool
+# ASSERT: status=scheduled, retry schedule created ~1 hour from now
+
+# 4. Clean up schedule
+```
+
+---
+
+## TC13: Inbound Call — Partial Data (Always Retry)
+
+**Type**: Fully automated (simulate webhooks)
+
+```bash
+# 1. Clear state
+echo '{}' | aws s3 cp - s3://$S3_BUCKET/state.json
+
+# 2. Simulate inbound call_analyzed with 2/4 fields (BEFORE fallback hour)
+curl -s -X POST "$FURL" \
+  -H "Content-Type: application/json" \
+  -d '{"event":"call_analyzed","call":{"direction":"inbound","call_id":"inbound-3","call_analysis":{"custom_analysis_data":{"vision":"Build the future","most_important_goal_now":"Launch MVP","yesterday_performance":null,"daily_plan_for_goal":null,"call_later_time":""}}}}'
+
+# 3. Check state
+aws s3 cp s3://$S3_BUCKET/state.json - | python3 -m json.tool
+# ASSERT: status=scheduled (retry), even though before fallback
+# ASSERT: today_data has vision and most_important_goal_now
+
+# 4. Clean up schedule
+```
+
+---
+
+## TC14: Schedule Preservation — Old Schedules Not Deleted
+
+**Type**: Fully automated
+
+```bash
+# 1. Clear state
+echo '{}' | aws s3 cp - s3://$S3_BUCKET/state.json
+
+# 2. First trigger: call at 15:00
+curl -s -X POST "$FURL" \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: $TRIGGER_API_KEY" \
+  -d '{"action":"trigger","source":"alarm","call_at":"2026-03-07T15:00:00"}'
+
+# 3. Note schedule name
+SCHED1=$(aws s3 cp s3://$S3_BUCKET/state.json - | python3 -c "import sys,json; print(json.load(sys.stdin).get('schedule_name',''))")
+
+# 4. Second trigger: call at 13:00 (earlier)
+curl -s -X POST "$FURL" \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: $TRIGGER_API_KEY" \
+  -d '{"action":"trigger","source":"location","call_at":"2026-03-07T13:00:00"}'
+
+# 5. Both schedules should exist (old NOT deleted)
+aws scheduler list-schedules --group-name retell-calls --region us-east-1
+# ASSERT: TWO one-time schedules exist (13:00 and 15:00)
+
+# 6. Clean up both schedules
+```
+
+---
+
+## TC15: Previous Answers Context in Retry Call
+
+**Type**: Automated setup + real phone call
+
+```bash
+# 1. Seed state with partial today_data (simulating a previous partial call)
+cat <<'EOF' | aws s3 cp - s3://$S3_BUCKET/state.json
+{"date":"2026-03-07","status":"pending","scheduled_call_time":null,"schedule_name":null,"call_attempts":1,"last_attempt_time":"2026-03-07T10:00:00","last_call_id":"prev-call","triggers":[],"call_later_time":null,"completed_at":null,"today_data":{"vision":"Build the future of logistics","most_important_goal_now":"Launch MVP"},"yesterday_data":null}
+EOF
+
+# 2. Trigger a call now
+curl -s -X POST "$FURL" \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: $TRIGGER_API_KEY" \
+  -d '{"action":"trigger","source":"manual"}'
+
+# 3. USER ACTION: Answer the call. Agent should:
+#    - Acknowledge previous answers ("picking up where we left off")
+#    - Skip vision and goal questions
+#    - Ask only about yesterday's performance and today's plan
+#    - Do confirmation recap of ALL 4 answers before pump-up
+
+# 4. Check CloudWatch Logs for the Retell API call payload
+#    Look for "previous_answers" containing vision and goal with
+#    performance and plan marked as "(not answered yet)"
+
+# 5. After call completes, check state
+aws s3 cp s3://$S3_BUCKET/state.json - | python3 -m json.tool
+# ASSERT: status=completed, today_data has all 4 fields
+```

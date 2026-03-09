@@ -136,6 +136,27 @@ def ensure_today(state):
 # Retell API
 # ---------------------------------------------------------------------------
 
+def _format_previous_answers(today_data):
+    """Format today_data into readable text for the agent prompt."""
+    if not today_data:
+        return "none"
+    fields = [
+        ("Vision", today_data.get("vision")),
+        ("Most important goal", today_data.get("most_important_goal_now")),
+        ("Yesterday performance", today_data.get("yesterday_performance_score")),
+        ("Plan for today", today_data.get("daily_plan_for_goal")),
+    ]
+    parts = []
+    has_any = False
+    for label, value in fields:
+        if value is not None and value != "":
+            parts.append(f"- {label}: {value}")
+            has_any = True
+        else:
+            parts.append(f"- {label}: (not answered yet)")
+    return "\n".join(parts) if has_any else "none"
+
+
 def retell_api(method, path, body=None):
     url = f"https://api.retellai.com{path}"
     data = json.dumps(body).encode("utf-8") if body else None
@@ -167,6 +188,7 @@ def initiate_call(state):
             "current_time": now.strftime("%-I:%M %p ") + _tz_abbreviation(),
             "current_date": now.strftime("%A, %B %-d, %Y"),
             "timezone_name": _tz_abbreviation(),
+            "previous_answers": _format_previous_answers(state.get("today_data")),
         },
     })
 
@@ -368,10 +390,7 @@ def handle_trigger(body):
         # No call_at specified — call in 1 minute
         earliest_iso = (now + timedelta(minutes=1)).isoformat()
 
-    # Cancel existing schedule
-    cancel_schedule(state.get("schedule_name"))
-
-    # Schedule new call
+    # Schedule new call (old schedules are kept — they auto-skip if call already made)
     name, scheduled_time = schedule_call(earliest_iso, reason=f"trigger:{source}")
     state["status"] = "scheduled"
     state["scheduled_call_time"] = scheduled_time
@@ -389,6 +408,11 @@ def handle_initiate_call():
         save_state(state)
         print("Skipping initiate_call: already completed today")
         return {"statusCode": 200, "body": json.dumps({"message": "Already completed"})}
+
+    if state["status"] == "calling" and not is_stale_call(state):
+        save_state(state)
+        print("Skipping initiate_call: call already in progress")
+        return {"statusCode": 200, "body": json.dumps({"message": "Call in progress"})}
 
     if state["call_attempts"] >= MAX_ATTEMPTS:
         save_state(state)
@@ -452,7 +476,8 @@ def handle_call_ended(body):
     call = body.get("call", {})
     call_status = call.get("call_status", "")
     disconnection_reason = call.get("disconnection_reason", "")
-    print(f"call_ended: status={call_status}, reason={disconnection_reason}")
+    direction = call.get("direction", "outbound")
+    print(f"call_ended: status={call_status}, reason={disconnection_reason}, direction={direction}")
 
     no_answer_reasons = {
         "dial_no_answer", "dial_busy", "voicemail_reached", "machine_detected",
@@ -463,7 +488,6 @@ def handle_call_ended(body):
         now = now_in_tz()
         if state["call_attempts"] < MAX_ATTEMPTS and now.hour < CUTOFF_HOUR:
             retry_time = (now + timedelta(hours=1)).isoformat()
-            cancel_schedule(state.get("schedule_name"))
             name, scheduled_time = schedule_call(retry_time, reason=f"retry:no_answer:{disconnection_reason}")
             state["status"] = "scheduled"
             state["scheduled_call_time"] = scheduled_time
@@ -478,9 +502,10 @@ def handle_call_ended(body):
         elif disconnection_reason.startswith("error"):
             # Error — retry
             now = now_in_tz()
-            if state["call_attempts"] < MAX_ATTEMPTS and now.hour < CUTOFF_HOUR:
+            if direction == "inbound" and now.hour < FALLBACK_HOUR:
+                print("Inbound error before fallback — ignoring, fallback will handle")
+            elif state["call_attempts"] < MAX_ATTEMPTS and now.hour < CUTOFF_HOUR:
                 retry_time = (now + timedelta(hours=1)).isoformat()
-                cancel_schedule(state.get("schedule_name"))
                 name, scheduled_time = schedule_call(retry_time, reason=f"retry:error:{disconnection_reason}")
                 state["status"] = "scheduled"
                 state["scheduled_call_time"] = scheduled_time
@@ -497,6 +522,7 @@ def handle_call_analyzed(body):
     state = ensure_today(state)
 
     call = body.get("call", {})
+    direction = call.get("direction", "outbound")
     analysis = call.get("call_analysis", {})
     custom = analysis.get("custom_analysis_data", {})
 
@@ -507,14 +533,13 @@ def handle_call_analyzed(body):
     call_later_time = custom.get("call_later_time")
     performance_score = parse_performance_score(yesterday_performance)
 
-    print(f"call_analyzed: vision={vision}, goal={goal}, perf={yesterday_performance}, plan={plan}, call_later={call_later_time}")
+    print(f"call_analyzed: vision={vision}, goal={goal}, perf={yesterday_performance}, plan={plan}, call_later={call_later_time}, direction={direction}")
 
     # "Call me later" — schedule callback, don't post to Slack
     if call_later_time and call_later_time.strip():
         try:
             clt_dt = datetime.strptime(f"{today_str()} {call_later_time.strip()}", "%Y-%m-%d %H:%M")
             clt_iso = clt_dt.isoformat()
-            cancel_schedule(state.get("schedule_name"))
             name, scheduled_time = schedule_call(clt_iso, reason=f"call_later:{call_later_time}")
             state["status"] = "scheduled"
             state["scheduled_call_time"] = scheduled_time
@@ -563,10 +588,17 @@ def handle_call_analyzed(body):
     elif partial_data:
         state["today_data"] = partial_data
 
+    # Inbound zero-data (no fields at all): before fallback, ignore and let fallback handle
     now = now_in_tz()
+    if direction == "inbound" and not partial_data:
+        if now.hour < FALLBACK_HOUR:
+            print("Inbound zero-data before fallback — ignoring, fallback will handle")
+            save_state(state)
+            return {"statusCode": 200, "body": json.dumps({"message": "Inbound ignored pre-fallback"})}
+        # After fallback: fall through to regular retry logic below
+
     if state["call_attempts"] < MAX_ATTEMPTS and now.hour < CUTOFF_HOUR:
         retry_time = (now + timedelta(hours=1)).isoformat()
-        cancel_schedule(state.get("schedule_name"))
         name, scheduled_time = schedule_call(retry_time, reason="retry:partial_call")
         state["status"] = "scheduled"
         state["scheduled_call_time"] = scheduled_time

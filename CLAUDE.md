@@ -155,6 +155,10 @@ curl -X POST $FUNCTION_URL -H "Content-Type: application/json" -H "x-api-key: $T
 - **Max 5 retries per day**, 1 hour between retries
 - **Cutoff hour**: Logs whatever data exists (partial or none)
 - **Yesterday context**: Injected via `retell_llm_dynamic_variables` at call creation
+- **Previous answers context**: Partial answers from earlier calls injected via `previous_answers` dynamic variable so retry calls skip already-answered questions
+- **Inbound call handling**: Uses `call["direction"]` from Retell webhooks. Inbound zero-data before fallback hour → ignored (fallback handles it). Inbound zero-data after fallback → regular retry. Inbound partial data → always retry. Inbound call_later → always honored.
+- **Schedules are never canceled**: New schedules are created alongside old ones. Old schedules fire and are no-ops (status checks skip redundant calls). Auto-deleted by EventBridge after firing.
+- **Confirmation recap**: Agent repeats back all answers before the pump-up sentence to catch transcription errors
 
 ## Retell Webhook Payload Structure
 
@@ -163,6 +167,7 @@ curl -X POST $FUNCTION_URL -H "Content-Type: application/json" -H "x-api-key: $T
 {
   "event": "call_analyzed",
   "call": {
+    "direction": "inbound|outbound",
     "call_analysis": {
       "custom_analysis_data": {
         "vision": "...",
@@ -183,7 +188,8 @@ curl -X POST $FUNCTION_URL -H "Content-Type: application/json" -H "x-api-key: $T
   "call": {
     "call_id": "...",
     "call_status": "ended|not_connected|error",
-    "disconnection_reason": "user_hangup|agent_hangup|dial_no_answer|..."
+    "disconnection_reason": "user_hangup|agent_hangup|dial_no_answer|...",
+    "direction": "inbound|outbound"
   }
 }
 ```
