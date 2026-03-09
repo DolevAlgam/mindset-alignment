@@ -224,14 +224,17 @@ def cancel_schedule(name):
 # ---------------------------------------------------------------------------
 
 def parse_performance_score(value):
-    """Extract integer 1-5 from values like '3', '3/5', 3, or '3 out of 5'."""
-    if value is None:
+    """Extract integer 1-5 from values like '3', '3/5', 3, or '3 out of 5'.
+    Returns None for 0, None, empty, or unparseable values (0 means no answer given)."""
+    if not value:
         return None
     if isinstance(value, (int, float)):
-        return max(1, min(5, int(value)))
+        score = int(value)
+        return score if 1 <= score <= 5 else None
     match = re.search(r"(\d)", str(value))
     if match:
-        return max(1, min(5, int(match.group(1))))
+        score = int(match.group(1))
+        return score if 1 <= score <= 5 else None
     return None
 
 
