@@ -59,10 +59,18 @@ def _tz_offset():
 
 
 def _tz_abbreviation():
-    """Return the short timezone abbreviation (e.g. 'EST', 'IDT', 'PST')."""
+    """Return a speech-friendly timezone name (e.g. 'Eastern time', 'Pacific time')."""
+    SPEECH_NAMES = {
+        "EST": "Eastern time", "EDT": "Eastern time",
+        "CST": "Central time", "CDT": "Central time",
+        "MST": "Mountain time", "MDT": "Mountain time",
+        "PST": "Pacific time", "PDT": "Pacific time",
+        "IST": "Israel time", "IDT": "Israel time",
+    }
     try:
         import zoneinfo
-        return datetime.now(zoneinfo.ZoneInfo(TIMEZONE)).strftime("%Z")
+        abbr = datetime.now(zoneinfo.ZoneInfo(TIMEZONE)).strftime("%Z")
+        return SPEECH_NAMES.get(abbr, abbr)
     except Exception:
         return TIMEZONE
 
@@ -222,7 +230,7 @@ def schedule_call(at_time_str, reason="scheduled"):
         Target={
             "Arn": LAMBDA_ARN,
             "RoleArn": SCHEDULER_ROLE_ARN,
-            "Input": json.dumps({"action": "initiate_call"}),
+            "Input": json.dumps({"action": "initiate_call", "reason": reason}),
         },
         FlexibleTimeWindow={"Mode": "OFF"},
         ActionAfterCompletion="DELETE",
@@ -400,9 +408,10 @@ def handle_trigger(body):
     return {"statusCode": 200, "body": json.dumps({"message": "Scheduled", "schedule_name": name, "call_at": scheduled_time})}
 
 
-def handle_initiate_call():
+def handle_initiate_call(reason=""):
     state = get_state()
     state = ensure_today(state)
+    is_call_later = reason.startswith("call_later")
 
     if state["status"] == "completed":
         save_state(state)
@@ -414,7 +423,20 @@ def handle_initiate_call():
         print("Skipping initiate_call: call already in progress")
         return {"statusCode": 200, "body": json.dumps({"message": "Call in progress"})}
 
-    if state["call_attempts"] >= MAX_ATTEMPTS:
+    # Retries skip when a future call_later is pending (call_later takes priority)
+    if not is_call_later and state.get("call_later_time"):
+        try:
+            clt_dt = datetime.strptime(f"{today_str()} {state['call_later_time']}", "%Y-%m-%d %H:%M")
+            clt_dt = clt_dt.replace(tzinfo=now_in_tz().tzinfo)
+            if clt_dt > now_in_tz():
+                save_state(state)
+                print(f"Skipping retry: call_later pending at {state['call_later_time']}")
+                return {"statusCode": 200, "body": json.dumps({"message": f"Skipped, call_later at {state['call_later_time']}"})}
+        except ValueError:
+            pass
+
+    # call_later bypasses MAX_ATTEMPTS (user explicitly asked to be called back)
+    if not is_call_later and state["call_attempts"] >= MAX_ATTEMPTS:
         save_state(state)
         print(f"Skipping initiate_call: max attempts ({MAX_ATTEMPTS}) reached")
         return {"statusCode": 200, "body": json.dumps({"message": "Max attempts reached"})}
@@ -425,6 +447,8 @@ def handle_initiate_call():
         return handle_cutoff_log()
 
     initiate_call(state)
+    if is_call_later:
+        state["call_later_time"] = None
     save_state(state)
     return {"statusCode": 200, "body": json.dumps({"message": "Call initiated"})}
 
@@ -535,19 +559,24 @@ def handle_call_analyzed(body):
 
     print(f"call_analyzed: vision={vision}, goal={goal}, perf={yesterday_performance}, plan={plan}, call_later={call_later_time}, direction={direction}")
 
-    # "Call me later" — schedule callback, don't post to Slack
+    # "Call me later" — schedule callback and notify Slack
     if call_later_time and call_later_time.strip():
         try:
             clt_dt = datetime.strptime(f"{today_str()} {call_later_time.strip()}", "%Y-%m-%d %H:%M")
-            clt_iso = clt_dt.isoformat()
-            name, scheduled_time = schedule_call(clt_iso, reason=f"call_later:{call_later_time}")
-            state["status"] = "scheduled"
-            state["scheduled_call_time"] = scheduled_time
-            state["schedule_name"] = name
-            state["call_later_time"] = call_later_time.strip()
-            save_state(state)
-            print(f"Call later scheduled for {call_later_time}")
-            return {"statusCode": 200, "body": json.dumps({"message": "Call later scheduled"})}
+            clt_with_tz = clt_dt.replace(tzinfo=now_in_tz().tzinfo)
+            if clt_with_tz > now_in_tz():
+                clt_iso = clt_dt.isoformat()
+                name, scheduled_time = schedule_call(clt_iso, reason=f"call_later:{call_later_time}")
+                state["status"] = "scheduled"
+                state["scheduled_call_time"] = scheduled_time
+                state["schedule_name"] = name
+                state["call_later_time"] = call_later_time.strip()
+                save_state(state)
+                print(f"Call later scheduled for {call_later_time}")
+                post_to_slack(f"Next call scheduled for {call_later_time} {_tz_abbreviation()} (call me later)")
+                return {"statusCode": 200, "body": json.dumps({"message": "Call later scheduled"})}
+            else:
+                print(f"call_later_time {call_later_time} is in the past, treating as partial call")
         except ValueError:
             print(f"Could not parse call_later_time: {call_later_time}")
 
@@ -666,7 +695,7 @@ def lambda_handler(event, context):
     if "action" in event:
         action = event["action"]
         if action == "initiate_call":
-            return handle_initiate_call()
+            return handle_initiate_call(reason=event.get("reason", ""))
         if action == "daily_fallback":
             return handle_daily_fallback()
         if action == "cutoff_log":

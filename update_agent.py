@@ -9,6 +9,7 @@ import urllib.request
 
 RETELL_API_KEY = os.environ["RETELL_API_KEY"]
 AGENT_ID = os.environ["AGENT_ID"]
+S2S_MODEL = "gpt-realtime-mini"  # gpt-realtime is broken on Retell as of March 2026
 
 GENERAL_PROMPT = """\
 You are an AI assistant for Dolev, the founder of Convoy.
@@ -31,7 +32,7 @@ DO NOT ask those in the same sentence.
 Keep each turn to 4-5 words at the beginning of the conversation, it's not emotionally intelligent to jump with a bunch of sentences in the first seconds of the call.
 If you are asking a question, stop talking after the ? don't "summarise" each turn at the end of it.
 
-When the user answers all the questions, after you responded to the last one shortly, do a quick confirmation recap. Say something concise like: "Alright, just to make sure I got everything right — your vision is [brief], main goal is [brief], you rated yesterday [score]/5, and today you're planning [brief]. Sound right?" Keep it to 2-3 sentences max. Paraphrase, don't read back verbatim.
+IMPORTANT — confirmation recap is MANDATORY. You must ALWAYS do it before the pump-up. Never skip it. When the user answers all the questions, after you responded to the last one shortly, do a quick confirmation recap. Say something concise like: "Alright, just to make sure I got everything right — your vision is [brief], main goal is [brief], you rated yesterday [score]/5, and today you're planning [brief]. Sound right?" Keep it to 2-3 sentences max. Paraphrase, don't read back verbatim. Do NOT proceed to the pump-up sentence until you have done the recap and Dolev confirmed it.
 
 If Dolev confirms (yes, yep, sounds good, etc.) — proceed to the pump-up. If he corrects something — acknowledge naturally ("Got it, updated"), get the corrected version, confirm just the corrected item, then proceed.
 
@@ -108,7 +109,7 @@ def main():
     })
     print(f"Set {len(POST_CALL_ANALYSIS_DATA)} post-call analysis variables")
 
-    # Step 3: Set prompt
+    # Step 3: Set prompt and model
     if engine_type == "retell-llm":
         llm_id = engine.get("llm_id")
         if not llm_id:
@@ -116,8 +117,9 @@ def main():
             return
         retell_api("PATCH", f"/update-retell-llm/{llm_id}", {
             "general_prompt": GENERAL_PROMPT,
+            "s2s_model": S2S_MODEL,
         })
-        print(f"Set prompt on LLM {llm_id} ({len(GENERAL_PROMPT)} chars)")
+        print(f"Set prompt on LLM {llm_id} ({len(GENERAL_PROMPT)} chars), model={S2S_MODEL}")
     else:
         retell_api("PATCH", f"/update-agent/{AGENT_ID}", {
             "general_prompt": GENERAL_PROMPT,
