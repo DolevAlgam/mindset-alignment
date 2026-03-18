@@ -70,7 +70,7 @@ EventBridge 8 PM ─────────────────────
 |------|---------|
 | `lambda_function.py` | Lambda handler: event routing, state management, call orchestration, Slack/CW output |
 | `provision_scheduler.py` | Infra provisioning: S3, IAM, EventBridge, Lambda config. Reads `.env` |
-| `update_agent.py` | Sets Retell agent prompt and post-call analysis variables. Reads `.env` |
+| `update_agent.py` | Sets Retell agent prompt, post-call analysis variables, and s2s_model. Reads `.env` |
 | `create_dashboard.py` | CloudWatch dashboard creation/update |
 | `.env` | Local secrets (gitignored): `RETELL_API_KEY`, `AGENT_ID`, `FROM_NUMBER`, `TO_NUMBER` |
 | `.env.example` | Template for `.env` |
@@ -129,7 +129,7 @@ Single JSON file tracks daily call lifecycle:
 ## Event Routing
 
 The Lambda routes based on event shape:
-- **EventBridge Scheduler**: `{"action": "initiate_call|daily_fallback|cutoff_log"}`
+- **EventBridge Scheduler**: `{"action": "initiate_call|daily_fallback|cutoff_log", "reason": "..."}` (reason tracks why: `call_later:17:00`, `retry:no_answer:voicemail_reached`, `trigger:alarm`, etc.)
 - **HTTP trigger API**: `{"action": "trigger", "source": "...", "call_at": "..."}` with `x-api-key` header
 - **Retell webhooks**: `{"event": "call_ended|call_analyzed", "call": {...}}`
 
@@ -152,13 +152,16 @@ curl -X POST $FUNCTION_URL -H "Content-Type: application/json" -H "x-api-key: $T
 - **EMF metrics**: Performance score emitted via Embedded Metric Format (no extra IAM needed)
 - **EventBridge Scheduler**: One-time schedules with `ActionAfterCompletion=DELETE` for call scheduling
 - **Stale call detection**: If status is "calling" but >10 min since last attempt, treat as failed
-- **Max 5 retries per day**, 1 hour between retries
+- **Max 5 retries per day**, 1 hour between retries. **call_later bypasses this limit** — user-requested callbacks always fire regardless of attempt count
 - **Cutoff hour**: Logs whatever data exists (partial or none)
 - **Yesterday context**: Injected via `retell_llm_dynamic_variables` at call creation
 - **Previous answers context**: Partial answers from earlier calls injected via `previous_answers` dynamic variable so retry calls skip already-answered questions
 - **Inbound call handling**: Uses `call["direction"]` from Retell webhooks. Inbound zero-data before fallback hour → ignored (fallback handles it). Inbound zero-data after fallback → regular retry. Inbound partial data → always retry. Inbound call_later → always honored.
-- **Schedules are never canceled**: New schedules are created alongside old ones. Old schedules fire and are no-ops (status checks skip redundant calls). Auto-deleted by EventBridge after firing.
-- **Confirmation recap**: Agent repeats back all answers before the pump-up sentence to catch transcription errors
+- **Schedules are never canceled**: New schedules are created alongside old ones. Old schedules fire and are no-ops (status checks skip redundant calls). Auto-deleted by EventBridge after firing. **Retries skip when a future call_later is pending** (call_later takes priority over automatic retries).
+- **call_later_time validation**: Must be in the future; past times are ignored and fall through to normal retry logic
+- **Slack notifications**: call_later posts the next scheduled call time to Slack for visibility
+- **Speech-friendly timezone**: `timezone_name` dynamic variable uses natural names ("Eastern time") instead of abbreviations ("EDT")
+- **Confirmation recap**: Agent repeats back all answers before the pump-up sentence to catch transcription errors (mandatory in prompt)
 
 ## Retell Webhook Payload Structure
 
