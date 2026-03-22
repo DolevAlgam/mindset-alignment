@@ -550,12 +550,27 @@ def handle_call_analyzed(body):
     analysis = call.get("call_analysis", {})
     custom = analysis.get("custom_analysis_data", {})
 
+    # Discard voicemail data — Retell sometimes fails to detect voicemail and
+    # the post-call analysis extracts garbage from the voicemail greeting
+    if analysis.get("in_voicemail"):
+        print("call_analyzed: voicemail detected (in_voicemail=true), discarding")
+        save_state(state)
+        return {"statusCode": 200, "body": json.dumps({"message": "Voicemail ignored"})}
+
     vision = custom.get("vision")
     goal = custom.get("most_important_goal_now")
     yesterday_performance = custom.get("yesterday_performance")
     plan = custom.get("daily_plan_for_goal")
     call_later_time = custom.get("call_later_time")
     performance_score = parse_performance_score(yesterday_performance)
+
+    # Second voicemail guard: if extracted text looks like a voicemail greeting
+    VOICEMAIL_PHRASES = ["you've reached", "leave a message", "not available", "after the tone", "voicemail"]
+    all_text = " ".join(str(v).lower() for v in [vision, goal, plan] if v)
+    if any(phrase in all_text for phrase in VOICEMAIL_PHRASES):
+        print(f"call_analyzed: voicemail greeting detected in data, discarding: {all_text[:100]}")
+        save_state(state)
+        return {"statusCode": 200, "body": json.dumps({"message": "Voicemail greeting ignored"})}
 
     print(f"call_analyzed: vision={vision}, goal={goal}, perf={yesterday_performance}, plan={plan}, call_later={call_later_time}, direction={direction}")
 
