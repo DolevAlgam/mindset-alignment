@@ -161,6 +161,7 @@ curl -X POST $FUNCTION_URL -H "Content-Type: application/json" -H "x-api-key: $T
 - **call_later_time validation**: Must be in the future; past times are ignored and fall through to normal retry logic
 - **Slack notifications**: call_later posts the next scheduled call time to Slack for visibility
 - **Speech-friendly timezone**: `timezone_name` dynamic variable uses natural names ("Eastern time") instead of abbreviations ("EDT")
+- **Voicemail guard**: `call_analyzed` checks Retell's `in_voicemail` flag and discards data — Retell still runs post-call analysis on voicemails, extracting garbage from the greeting
 - **Confirmation recap**: Agent repeats back all answers before the pump-up sentence to catch transcription errors (mandatory in prompt)
 
 ## Retell Webhook Payload Structure
