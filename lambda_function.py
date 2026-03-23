@@ -551,11 +551,20 @@ def handle_call_analyzed(body):
     custom = analysis.get("custom_analysis_data", {})
 
     # Discard voicemail data — Retell flags voicemails via in_voicemail but
-    # still runs post-call analysis which extracts garbage from the greeting
+    # still runs post-call analysis which extracts garbage from the greeting.
+    # Since call_ended is not in webhook_events, retries must be scheduled here.
     if analysis.get("in_voicemail"):
         print("call_analyzed: voicemail detected (in_voicemail=true), discarding")
+        now = now_in_tz()
+        if state["call_attempts"] < MAX_ATTEMPTS and now.hour < CUTOFF_HOUR:
+            retry_time = (now + timedelta(hours=1)).isoformat()
+            name, scheduled_time = schedule_call(retry_time, reason="retry:voicemail")
+            state["status"] = "scheduled"
+            state["scheduled_call_time"] = scheduled_time
+            state["schedule_name"] = name
+            print(f"Voicemail retry scheduled for {scheduled_time}")
         save_state(state)
-        return {"statusCode": 200, "body": json.dumps({"message": "Voicemail ignored"})}
+        return {"statusCode": 200, "body": json.dumps({"message": "Voicemail ignored, retry scheduled"})}
 
     vision = custom.get("vision")
     goal = custom.get("most_important_goal_now")
