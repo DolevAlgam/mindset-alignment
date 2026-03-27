@@ -152,7 +152,7 @@ curl -X POST $FUNCTION_URL -H "Content-Type: application/json" -H "x-api-key: $T
 - **EMF metrics**: Performance score emitted via Embedded Metric Format (no extra IAM needed)
 - **EventBridge Scheduler**: One-time schedules with `ActionAfterCompletion=DELETE` for call scheduling
 - **Stale call detection**: If status is "calling" but >10 min since last attempt, treat as failed
-- **Max 5 retries per day**, 1 hour between retries. **call_later bypasses this limit** — user-requested callbacks always fire regardless of attempt count
+- **Max 8 retries per day**, 1 hour between retries. **call_later bypasses this limit** — user-requested callbacks always fire regardless of attempt count
 - **Cutoff hour**: Logs whatever data exists (partial or none)
 - **Yesterday context**: Injected via `retell_llm_dynamic_variables` at call creation
 - **Previous answers context**: Partial answers from earlier calls injected via `previous_answers` dynamic variable so retry calls skip already-answered questions

@@ -22,7 +22,7 @@ CUTOFF_HOUR = int(os.environ.get("CUTOFF_HOUR", "20"))
 SCHEDULER_ROLE_ARN = os.environ.get("SCHEDULER_ROLE_ARN", "")
 LAMBDA_ARN = os.environ["LAMBDA_ARN"]
 SCHEDULE_GROUP = "retell-calls"
-MAX_ATTEMPTS = 5
+MAX_ATTEMPTS = 8
 STATE_KEY = "state.json"
 STALE_CALL_MINUTES = 10
 
