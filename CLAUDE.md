@@ -104,6 +104,35 @@ All scripts are safe to re-run:
 - `create_dashboard.py` always overwrites the dashboard with the desired state.
 - Lambda deploy always overwrites the function code.
 
+## Pausing / Resuming Calls
+
+Calls are currently **PAUSED** (since 2026-04-09). The `daily-fallback` and `cutoff-log` schedules are disabled.
+
+To **resume** calls:
+```bash
+# Get current schedule config, then re-enable
+for name in daily-fallback cutoff-log; do
+  expr=$(aws scheduler get-schedule --group-name retell-calls --name $name --region us-east-1 --query 'ScheduleExpression' --output text)
+  target=$(aws scheduler get-schedule --group-name retell-calls --name $name --region us-east-1 --query 'Target' --output json)
+  aws scheduler update-schedule --group-name retell-calls --name $name --state ENABLED \
+    --region us-east-1 --flexible-time-window '{"Mode":"OFF"}' \
+    --schedule-expression "$expr" --target "$target"
+done
+```
+
+To **pause** calls again:
+```bash
+for name in daily-fallback cutoff-log; do
+  expr=$(aws scheduler get-schedule --group-name retell-calls --name $name --region us-east-1 --query 'ScheduleExpression' --output text)
+  target=$(aws scheduler get-schedule --group-name retell-calls --name $name --region us-east-1 --query 'Target' --output json)
+  aws scheduler update-schedule --group-name retell-calls --name $name --state DISABLED \
+    --region us-east-1 --flexible-time-window '{"Mode":"OFF"}' \
+    --schedule-expression "$expr" --target "$target"
+done
+```
+
+Note: External triggers (alarm, location, manual API) can still initiate calls even when paused. Only the recurring schedules are affected.
+
 ## S3 State (`state.json`)
 
 Single JSON file tracks daily call lifecycle:
